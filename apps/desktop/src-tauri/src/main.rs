@@ -9,6 +9,8 @@ fn main() {
             commands::read_file,
             commands::write_file,
             commands::analyze_sql,
+            commands::read_csv,
+            commands::read_parquet,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

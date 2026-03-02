@@ -1,6 +1,8 @@
+import { useState, useEffect } from "react";
 import Editor from "@monaco-editor/react";
 import { invoke } from "@tauri-apps/api/tauri";
 import { VscClose } from "react-icons/vsc";
+import VisualizationPanel from "./VisualizationPanel";
 
 interface OpenFile {
   path: string;
@@ -18,6 +20,27 @@ interface Props {
   onSave: (index: number) => void;
 }
 
+type FileType = "csv" | "parquet" | "sql" | "unknown";
+
+function getFileType(filename: string): FileType {
+  const ext = filename.split(".").pop()?.toLowerCase();
+  switch (ext) {
+    case "csv":
+      return "csv";
+    case "parquet":
+    case "pq":
+      return "parquet";
+    case "sql":
+      return "sql";
+    default:
+      return "unknown";
+  }
+}
+
+const DEFAULT_PANEL_HEIGHT = 200;
+const MIN_PANEL_HEIGHT = 100;
+const MAX_PANEL_RATIO = 0.6;
+
 function CodeEditor({
   files,
   activeIndex,
@@ -27,6 +50,18 @@ function CodeEditor({
   onSave,
 }: Props) {
   const activeFile = activeIndex >= 0 ? files[activeIndex] : null;
+  const [panelHeight, setPanelHeight] = useState(DEFAULT_PANEL_HEIGHT);
+  const [panelCollapsed, setPanelCollapsed] = useState(false);
+  const [showPanel, setShowPanel] = useState(false);
+
+  useEffect(() => {
+    if (activeFile) {
+      const fileType = getFileType(activeFile.name);
+      setShowPanel(fileType !== "unknown");
+    } else {
+      setShowPanel(false);
+    }
+  }, [activeFile?.path]);
 
   const getLanguage = (filename: string): string => {
     const ext = filename.split(".").pop()?.toLowerCase();
@@ -84,15 +119,38 @@ function CodeEditor({
     monaco.editor.setTheme("ambilab-dark");
   };
 
+  const handleResizeStart = (e: React.MouseEvent) => {
+    e.preventDefault();
+    const startY = e.clientY;
+    const startHeight = panelHeight;
+    const container = (e.target as HTMLElement).parentElement;
+    const maxHeight = container ? container.clientHeight * MAX_PANEL_RATIO : 400;
+
+    const onMouseMove = (e: MouseEvent) => {
+      const delta = startY - e.clientY;
+      const newHeight = Math.max(
+        MIN_PANEL_HEIGHT,
+        Math.min(maxHeight, startHeight + delta)
+      );
+      setPanelHeight(newHeight);
+    };
+
+    const onMouseUp = () => {
+      document.removeEventListener("mousemove", onMouseMove);
+      document.removeEventListener("mouseup", onMouseUp);
+    };
+
+    document.addEventListener("mousemove", onMouseMove);
+    document.addEventListener("mouseup", onMouseUp);
+  };
+
   if (files.length === 0) {
     return (
       <div className="editor-area">
         <div className="welcome-screen">
           <div className="welcome-logo">{"</>"}</div>
           <h1 className="welcome-title">AmbiLab IDE</h1>
-          <p className="welcome-subtitle">
-            AI-Powered Local Analytics IDE
-          </p>
+          <p className="welcome-subtitle">AI-Powered Local Analytics IDE</p>
           <p style={{ color: "var(--text-muted)", fontSize: "12px" }}>
             Open a folder to get started
           </p>
@@ -100,6 +158,8 @@ function CodeEditor({
       </div>
     );
   }
+
+  const showVisualization = showPanel && activeFile;
 
   return (
     <>
@@ -125,27 +185,55 @@ function CodeEditor({
         ))}
       </div>
 
-      <div className="editor-content">
-        {activeFile && (
-          <Editor
-            height="100%"
-            language={getLanguage(activeFile.name)}
-            value={activeFile.content}
-            onChange={(value) => onContentChange(value || "")}
-            onMount={handleEditorMount}
-            options={{
-              fontSize: 14,
-              fontFamily: "'Fira Code', 'Consolas', 'Monaco', monospace",
-              fontLigatures: true,
-              minimap: { enabled: true },
-              scrollBeyondLastLine: false,
-              renderLineHighlight: "all",
-              cursorBlinking: "smooth",
-              smoothScrolling: true,
-              padding: { top: 10 },
-              automaticLayout: true,
-            }}
-          />
+      <div className="editor-split-container">
+        <div
+          className="editor-content"
+          style={{
+            flex: showVisualization && !panelCollapsed ? undefined : 1,
+            height: showVisualization && !panelCollapsed
+              ? `calc(100% - ${panelHeight}px - 4px)`
+              : "100%",
+          }}
+        >
+          {activeFile && (
+            <Editor
+              height="100%"
+              language={getLanguage(activeFile.name)}
+              value={activeFile.content}
+              onChange={(value) => onContentChange(value || "")}
+              onMount={handleEditorMount}
+              options={{
+                fontSize: 14,
+                fontFamily: "'Fira Code', 'Consolas', 'Monaco', monospace",
+                fontLigatures: true,
+                minimap: { enabled: true },
+                scrollBeyondLastLine: false,
+                renderLineHighlight: "all",
+                cursorBlinking: "smooth",
+                smoothScrolling: true,
+                padding: { top: 10 },
+                automaticLayout: true,
+              }}
+            />
+          )}
+        </div>
+
+        {showVisualization && (
+          <>
+            {!panelCollapsed && (
+              <div
+                className="horizontal-resize-handle"
+                onMouseDown={handleResizeStart}
+              />
+            )}
+            <VisualizationPanel
+              file={activeFile}
+              height={panelHeight}
+              collapsed={panelCollapsed}
+              onToggleCollapse={() => setPanelCollapsed(!panelCollapsed)}
+              onClose={() => setShowPanel(false)}
+            />
+          </>
         )}
       </div>
     </>

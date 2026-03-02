@@ -1,0 +1,17 @@
+[package]
+name = "datagen"
+version = "0.1.0"
+edition = "2021"
+description = "Generate sample analytics data for testing"
+
+[[bin]]
+name = "datagen"
+path = "src/main.rs"
+
+[dependencies]
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+rand = "0.8"
+chrono = { version = "0.4", features = ["serde"] }
+rayon = "1.10"
+indicatif = "0.17"

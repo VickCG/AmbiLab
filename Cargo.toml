@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "packages/core",
     "apps/desktop/src-tauri",
+    "tools/datagen",
 ]
 
 [workspace.package]
