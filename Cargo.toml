@@ -1,28 +1,16 @@
-[package]
-name = "ambilab"
+[workspace]
+resolver = "2"
+members = [
+    "packages/core",
+    "apps/desktop/src-tauri",
+]
+
+[workspace.package]
 version = "0.1.0"
 edition = "2021"
 authors = ["AmbiLab Team"]
-description = "AI-Powered Local Analytics IDE - Pre-execution intelligence for SQL queries"
 license = "MIT"
 rust-version = "1.75"
-
-[lib]
-name = "ambilab"
-path = "src/lib.rs"
-
-[dependencies]
-sqlparser = "0.43"
-petgraph = "0.6"
-thiserror = "1.0"
-smallvec = { version = "1.13", features = ["const_generics"] }
-rustc-hash = "1.1"
-parking_lot = "0.12"
-rayon = "1.10"
-
-[dev-dependencies]
-criterion = "0.5"
-proptest = "1.4"
 
 [profile.release]
 opt-level = 3
@@ -30,14 +18,7 @@ lto = "fat"
 codegen-units = 1
 panic = "abort"
 strip = true
-debug = false
 
 [profile.dev]
 opt-level = 1
-debug = true
 incremental = true
-
-[profile.bench]
-inherits = "release"
-debug = true
-

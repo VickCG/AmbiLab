@@ -1,0 +1,13 @@
+{
+  "name": "ambilab",
+  "private": true,
+  "version": "0.1.0",
+  "workspaces": [
+    "apps/*"
+  ],
+  "scripts": {
+    "dev": "npm run dev --workspace=apps/desktop",
+    "build": "npm run build --workspace=apps/desktop",
+    "tauri": "npm run tauri --workspace=apps/desktop"
+  }
+}
