@@ -1,0 +1,41 @@
+# Rust
+/target/
+**/*.rs.bk
+
+# Dependencies (keep Cargo.lock for binary apps)
+
+# Tauri
+/src-tauri/target/
+/src-tauri/WixTools/
+/src-tauri/icons/
+
+# Frontend (if using React/Node)
+node_modules/
+dist/
+.next/
+build/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Environment
+.env
+.env.local
+.env.*.local
+*.pem
+
+# Logs
+*.log
+npm-debug.log*
+
+# Test/Coverage
+coverage/
+*.profraw
