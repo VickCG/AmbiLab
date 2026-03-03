@@ -8,14 +8,28 @@ interface DataPreview {
   total_rows: number;
 }
 
+export interface DataPreviewResult {
+  columns: string[];
+  rows: string[][];
+  total_rows: number;
+}
+
 interface Props {
   filePath: string;
-  fileType: "csv" | "parquet";
+  fileType: "csv" | "parquet" | "json" | "jsonl";
+  onDataLoaded?: (data: DataPreviewResult) => void;
 }
 
 const PAGE_SIZE = 100;
 
-function DataTableView({ filePath, fileType }: Props) {
+const COMMAND_MAP: Record<string, string> = {
+  csv: "read_csv",
+  parquet: "read_parquet",
+  json: "read_json",
+  jsonl: "read_jsonl",
+};
+
+function DataTableView({ filePath, fileType, onDataLoaded }: Props) {
   const [data, setData] = useState<DataPreview | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -32,13 +46,16 @@ function DataTableView({ filePath, fileType }: Props) {
     setError(null);
 
     try {
-      const command = fileType === "csv" ? "read_csv" : "read_parquet";
+      const command = COMMAND_MAP[fileType] || "read_csv";
       const result = await invoke<DataPreview>(command, {
         path: filePath,
         limit: PAGE_SIZE,
         offset: page * PAGE_SIZE,
       });
       setData(result);
+      if (onDataLoaded && page === 0) {
+        onDataLoaded(result);
+      }
     } catch (err) {
       setError(String(err));
     } finally {

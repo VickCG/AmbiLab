@@ -1,7 +1,8 @@
 use arrow::array::Array;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use std::fs::{self, File};
-use std::io::BufReader;
+use std::io::{BufRead, BufReader};
 use std::path::PathBuf;
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -176,6 +177,111 @@ pub fn read_parquet(path: String, limit: usize, offset: usize) -> Result<DataPre
         rows,
         total_rows,
     })
+}
+
+#[tauri::command]
+pub fn read_json(path: String, limit: usize, offset: usize) -> Result<DataPreview, String> {
+    let content = fs::read_to_string(&path).map_err(|e| e.to_string())?;
+    let value: Value = serde_json::from_str(&content).map_err(|e| e.to_string())?;
+
+    let records = match &value {
+        Value::Array(arr) => arr.clone(),
+        Value::Object(_) => vec![value],
+        _ => return Err("JSON must be an array or object".to_string()),
+    };
+
+    if records.is_empty() {
+        return Ok(DataPreview {
+            columns: vec![],
+            rows: vec![],
+            total_rows: 0,
+        });
+    }
+
+    let columns = extract_json_columns(&records[0]);
+    let total_rows = records.len();
+
+    let rows: Vec<Vec<String>> = records
+        .into_iter()
+        .skip(offset)
+        .take(limit)
+        .map(|record| extract_json_row(&record, &columns))
+        .collect();
+
+    Ok(DataPreview {
+        columns,
+        rows,
+        total_rows,
+    })
+}
+
+#[tauri::command]
+pub fn read_jsonl(path: String, limit: usize, offset: usize) -> Result<DataPreview, String> {
+    let file = File::open(&path).map_err(|e| e.to_string())?;
+    let reader = BufReader::new(file);
+
+    let mut records: Vec<Value> = Vec::new();
+    for line in reader.lines() {
+        let line = line.map_err(|e| e.to_string())?;
+        if line.trim().is_empty() {
+            continue;
+        }
+        let value: Value = serde_json::from_str(&line).map_err(|e| e.to_string())?;
+        records.push(value);
+    }
+
+    if records.is_empty() {
+        return Ok(DataPreview {
+            columns: vec![],
+            rows: vec![],
+            total_rows: 0,
+        });
+    }
+
+    let columns = extract_json_columns(&records[0]);
+    let total_rows = records.len();
+
+    let rows: Vec<Vec<String>> = records
+        .into_iter()
+        .skip(offset)
+        .take(limit)
+        .map(|record| extract_json_row(&record, &columns))
+        .collect();
+
+    Ok(DataPreview {
+        columns,
+        rows,
+        total_rows,
+    })
+}
+
+fn extract_json_columns(value: &Value) -> Vec<String> {
+    match value {
+        Value::Object(map) => map.keys().cloned().collect(),
+        _ => vec!["value".to_string()],
+    }
+}
+
+fn extract_json_row(value: &Value, columns: &[String]) -> Vec<String> {
+    match value {
+        Value::Object(map) => columns
+            .iter()
+            .map(|col| format_json_value(map.get(col)))
+            .collect(),
+        _ => vec![format_json_value(Some(value))],
+    }
+}
+
+fn format_json_value(value: Option<&Value>) -> String {
+    match value {
+        None => "NULL".to_string(),
+        Some(Value::Null) => "NULL".to_string(),
+        Some(Value::String(s)) => s.clone(),
+        Some(Value::Number(n)) => n.to_string(),
+        Some(Value::Bool(b)) => b.to_string(),
+        Some(Value::Array(arr)) => serde_json::to_string(arr).unwrap_or_default(),
+        Some(Value::Object(obj)) => serde_json::to_string(obj).unwrap_or_default(),
+    }
 }
 
 fn format_array_value(array: &dyn Array, idx: usize) -> String {

@@ -1,7 +1,11 @@
 import { useState } from "react";
+import { invoke } from "@tauri-apps/api/tauri";
 import FileExplorer from "./components/FileExplorer";
 import CodeEditor from "./components/CodeEditor";
 import AIChat from "./components/AIChat";
+import DataImport from "./components/DataImport";
+import { ImportedFile } from "./types/import";
+import { Workspace } from "./types/workspace";
 
 interface OpenFile {
   path: string;
@@ -11,12 +15,28 @@ interface OpenFile {
 }
 
 function App() {
+  const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
   const [openFiles, setOpenFiles] = useState<OpenFile[]>([]);
   const [activeFileIndex, setActiveFileIndex] = useState<number>(-1);
-  const [sidebarWidth, setSidebarWidth] = useState(250);
+  const [sidebarWidth, setSidebarWidth] = useState(280);
   const [chatWidth, setChatWidth] = useState(350);
+  const [showImportModal, setShowImportModal] = useState(false);
+  const [importWorkspaceId, setImportWorkspaceId] = useState<string | undefined>();
 
   const activeFile = activeFileIndex >= 0 ? openFiles[activeFileIndex] : null;
+
+  const handleAddWorkspace = (workspace: Workspace) => {
+    setWorkspaces((prev) => {
+      if (prev.some((ws) => ws.path === workspace.path)) {
+        return prev;
+      }
+      return [...prev, workspace];
+    });
+  };
+
+  const handleRemoveWorkspace = (workspaceId: string) => {
+    setWorkspaces((prev) => prev.filter((ws) => ws.id !== workspaceId));
+  };
 
   const handleFileOpen = (path: string, name: string, content: string) => {
     const existingIndex = openFiles.findIndex((f) => f.path === path);
@@ -59,10 +79,32 @@ function App() {
     setOpenFiles(newFiles);
   };
 
+  const handleImportClick = (workspaceId?: string) => {
+    setImportWorkspaceId(workspaceId);
+    setShowImportModal(true);
+  };
+
+  const handleImportFiles = async (importedFiles: ImportedFile[]) => {
+    for (const file of importedFiles) {
+      try {
+        const content = await invoke<string>("read_file", { path: file.path });
+        handleFileOpen(file.path, file.name, content);
+      } catch (err) {
+        console.error(`Failed to read imported file: ${file.path}`, err);
+      }
+    }
+  };
+
   return (
     <div className="app">
       <div className="sidebar" style={{ width: sidebarWidth }}>
-        <FileExplorer onFileOpen={handleFileOpen} />
+        <FileExplorer
+          workspaces={workspaces}
+          onFileOpen={handleFileOpen}
+          onImportClick={handleImportClick}
+          onAddWorkspace={handleAddWorkspace}
+          onRemoveWorkspace={handleRemoveWorkspace}
+        />
       </div>
 
       <div
@@ -73,7 +115,7 @@ function App() {
 
           const onMouseMove = (e: MouseEvent) => {
             const newWidth = startWidth + (e.clientX - startX);
-            setSidebarWidth(Math.max(150, Math.min(500, newWidth)));
+            setSidebarWidth(Math.max(200, Math.min(500, newWidth)));
           };
 
           const onMouseUp = () => {
@@ -121,6 +163,17 @@ function App() {
       <div className="chat-panel" style={{ width: chatWidth }}>
         <AIChat currentFile={activeFile} />
       </div>
+
+      <DataImport
+        isOpen={showImportModal}
+        onClose={() => {
+          setShowImportModal(false);
+          setImportWorkspaceId(undefined);
+        }}
+        onImport={handleImportFiles}
+        workspaces={workspaces}
+        activeWorkspaceId={importWorkspaceId}
+      />
     </div>
   );
 }
