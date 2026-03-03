@@ -2,8 +2,11 @@ use arrow::array::Array;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::fs::{self, File};
-use std::io::{BufRead, BufReader};
+use std::io::BufReader;
 use std::path::PathBuf;
+use tauri::State;
+
+use crate::file_cache::{FileCacheState, read_csv_page, read_jsonl_page};
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct FileEntry {
@@ -93,35 +96,19 @@ pub fn analyze_sql(query: String) -> Result<AnalysisResult, String> {
 }
 
 #[tauri::command]
-pub fn read_csv(path: String, limit: usize, offset: usize) -> Result<DataPreview, String> {
-    let file = File::open(&path).map_err(|e| e.to_string())?;
-    let mut reader = csv::Reader::from_reader(BufReader::new(file));
-
-    let headers: Vec<String> = reader
-        .headers()
-        .map_err(|e| e.to_string())?
-        .iter()
-        .map(|h| h.to_string())
-        .collect();
-
-    let mut all_rows: Vec<Vec<String>> = Vec::new();
-    for result in reader.records() {
-        let record = result.map_err(|e| e.to_string())?;
-        let row: Vec<String> = record.iter().map(|f| f.to_string()).collect();
-        all_rows.push(row);
-    }
-
-    let total_rows = all_rows.len();
-    let rows: Vec<Vec<String>> = all_rows
-        .into_iter()
-        .skip(offset)
-        .take(limit)
-        .collect();
-
+pub fn read_csv(
+    path: String,
+    limit: usize,
+    offset: usize,
+    cache: State<'_, FileCacheState>,
+) -> Result<DataPreview, String> {
+    let index = cache.0.get_or_build_csv(&path)?;
+    let page = if limit > 0 { offset / limit } else { 0 };
+    let rows = read_csv_page(&path, &index, page)?;
     Ok(DataPreview {
-        columns: headers,
+        columns: index.columns.clone(),
         rows,
-        total_rows,
+        total_rows: index.total_rows,
     })
 }
 
@@ -132,45 +119,42 @@ pub fn read_parquet(path: String, limit: usize, offset: usize) -> Result<DataPre
     let file = File::open(&path).map_err(|e| e.to_string())?;
     let builder = ParquetRecordBatchReaderBuilder::try_new(file).map_err(|e| e.to_string())?;
 
-    let metadata = builder.metadata();
-    let total_rows = metadata.file_metadata().num_rows() as usize;
+    let total_rows = builder.metadata().file_metadata().num_rows() as usize;
+    let columns: Vec<String> = builder
+        .schema()
+        .fields()
+        .iter()
+        .map(|f| f.name().clone())
+        .collect();
 
     let reader = builder.build().map_err(|e| e.to_string())?;
 
-    let mut columns: Vec<String> = Vec::new();
-    let mut all_rows: Vec<Vec<String>> = Vec::new();
-    let mut columns_set = false;
+    let mut rows: Vec<Vec<String>> = Vec::with_capacity(limit);
+    let mut rows_seen: usize = 0;
 
-    for batch_result in reader {
+    'outer: for batch_result in reader {
         let batch = batch_result.map_err(|e| e.to_string())?;
+        let num_rows = batch.num_rows();
 
-        if !columns_set {
-            columns = batch
-                .schema()
-                .fields()
-                .iter()
-                .map(|f| f.name().clone())
-                .collect();
-            columns_set = true;
+        if rows_seen + num_rows <= offset {
+            rows_seen += num_rows;
+            continue;
         }
 
-        let num_rows = batch.num_rows();
         for row_idx in 0..num_rows {
-            let mut row: Vec<String> = Vec::with_capacity(batch.num_columns());
-            for col_idx in 0..batch.num_columns() {
-                let col = batch.column(col_idx);
-                let value = format_array_value(col.as_ref(), row_idx);
-                row.push(value);
+            if rows_seen >= offset && rows.len() < limit {
+                let mut row: Vec<String> = Vec::with_capacity(batch.num_columns());
+                for col_idx in 0..batch.num_columns() {
+                    row.push(format_array_value(batch.column(col_idx).as_ref(), row_idx));
+                }
+                rows.push(row);
             }
-            all_rows.push(row);
+            rows_seen += 1;
+            if rows.len() >= limit {
+                break 'outer;
+            }
         }
     }
-
-    let rows: Vec<Vec<String>> = all_rows
-        .into_iter()
-        .skip(offset)
-        .take(limit)
-        .collect();
 
     Ok(DataPreview {
         columns,
@@ -184,9 +168,9 @@ pub fn read_json(path: String, limit: usize, offset: usize) -> Result<DataPrevie
     let content = fs::read_to_string(&path).map_err(|e| e.to_string())?;
     let value: Value = serde_json::from_str(&content).map_err(|e| e.to_string())?;
 
-    let records = match &value {
-        Value::Array(arr) => arr.clone(),
-        Value::Object(_) => vec![value],
+    let records = match value {
+        Value::Array(arr) => arr,
+        Value::Object(obj) => vec![Value::Object(obj)],
         _ => return Err("JSON must be an array or object".to_string()),
     };
 
@@ -216,42 +200,19 @@ pub fn read_json(path: String, limit: usize, offset: usize) -> Result<DataPrevie
 }
 
 #[tauri::command]
-pub fn read_jsonl(path: String, limit: usize, offset: usize) -> Result<DataPreview, String> {
-    let file = File::open(&path).map_err(|e| e.to_string())?;
-    let reader = BufReader::new(file);
-
-    let mut records: Vec<Value> = Vec::new();
-    for line in reader.lines() {
-        let line = line.map_err(|e| e.to_string())?;
-        if line.trim().is_empty() {
-            continue;
-        }
-        let value: Value = serde_json::from_str(&line).map_err(|e| e.to_string())?;
-        records.push(value);
-    }
-
-    if records.is_empty() {
-        return Ok(DataPreview {
-            columns: vec![],
-            rows: vec![],
-            total_rows: 0,
-        });
-    }
-
-    let columns = extract_json_columns(&records[0]);
-    let total_rows = records.len();
-
-    let rows: Vec<Vec<String>> = records
-        .into_iter()
-        .skip(offset)
-        .take(limit)
-        .map(|record| extract_json_row(&record, &columns))
-        .collect();
-
+pub fn read_jsonl(
+    path: String,
+    limit: usize,
+    offset: usize,
+    cache: State<'_, FileCacheState>,
+) -> Result<DataPreview, String> {
+    let index = cache.0.get_or_build_jsonl(&path)?;
+    let page = if limit > 0 { offset / limit } else { 0 };
+    let rows = read_jsonl_page(&path, &index, page)?;
     Ok(DataPreview {
-        columns,
+        columns: index.columns.clone(),
         rows,
-        total_rows,
+        total_rows: index.total_rows,
     })
 }
 
@@ -286,7 +247,7 @@ fn format_json_value(value: Option<&Value>) -> String {
 
 fn format_array_value(array: &dyn Array, idx: usize) -> String {
     use arrow::array::{
-        Float32Array, Float64Array, Int32Array, Int64Array, StringArray, BooleanArray,
+        BooleanArray, Float32Array, Float64Array, Int32Array, Int64Array, StringArray,
     };
     use arrow::datatypes::DataType;
 
@@ -295,30 +256,87 @@ fn format_array_value(array: &dyn Array, idx: usize) -> String {
     }
 
     match array.data_type() {
-        DataType::Utf8 => {
-            let arr = array.as_any().downcast_ref::<StringArray>().unwrap();
-            arr.value(idx).to_string()
-        }
-        DataType::Int32 => {
-            let arr = array.as_any().downcast_ref::<Int32Array>().unwrap();
-            arr.value(idx).to_string()
-        }
-        DataType::Int64 => {
-            let arr = array.as_any().downcast_ref::<Int64Array>().unwrap();
-            arr.value(idx).to_string()
-        }
-        DataType::Float32 => {
-            let arr = array.as_any().downcast_ref::<Float32Array>().unwrap();
-            arr.value(idx).to_string()
-        }
-        DataType::Float64 => {
-            let arr = array.as_any().downcast_ref::<Float64Array>().unwrap();
-            arr.value(idx).to_string()
-        }
-        DataType::Boolean => {
-            let arr = array.as_any().downcast_ref::<BooleanArray>().unwrap();
-            arr.value(idx).to_string()
-        }
+        DataType::Utf8 => array
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .map_or_else(|| "ERR".to_string(), |a| a.value(idx).to_string()),
+        DataType::Int32 => array
+            .as_any()
+            .downcast_ref::<Int32Array>()
+            .map_or_else(|| "ERR".to_string(), |a| a.value(idx).to_string()),
+        DataType::Int64 => array
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .map_or_else(|| "ERR".to_string(), |a| a.value(idx).to_string()),
+        DataType::Float32 => array
+            .as_any()
+            .downcast_ref::<Float32Array>()
+            .map_or_else(|| "ERR".to_string(), |a| a.value(idx).to_string()),
+        DataType::Float64 => array
+            .as_any()
+            .downcast_ref::<Float64Array>()
+            .map_or_else(|| "ERR".to_string(), |a| a.value(idx).to_string()),
+        DataType::Boolean => array
+            .as_any()
+            .downcast_ref::<BooleanArray>()
+            .map_or_else(|| "ERR".to_string(), |a| a.value(idx).to_string()),
         _ => format!("{:?}", array.data_type()),
     }
+}
+
+use crate::autosave::AutoSaveManager;
+use crate::workspace_config::WorkspaceConfig;
+use std::sync::Arc;
+
+pub struct AutoSaveState(pub Arc<AutoSaveManager>);
+
+#[tauri::command]
+pub async fn load_workspace_config(path: String) -> Result<WorkspaceConfig, String> {
+    WorkspaceConfig::load(&path)
+        .await
+        .map_err(|e| format!("{:?}", e))
+}
+
+#[tauri::command]
+pub async fn save_workspace_config(path: String, config: WorkspaceConfig) -> Result<(), String> {
+    config.save(&path).await.map_err(|e| format!("{:?}", e))
+}
+
+#[tauri::command]
+pub fn workspace_config_exists(path: String) -> bool {
+    WorkspaceConfig::exists(&path)
+}
+
+#[tauri::command]
+pub async fn update_workspace_config(
+    path: String,
+    config: WorkspaceConfig,
+    autosave: State<'_, AutoSaveState>,
+) -> Result<(), String> {
+    autosave.0.queue_save(path, config);
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn create_workspace_with_config(
+    path: String,
+    name: String,
+    color: Option<String>,
+) -> Result<WorkspaceConfig, String> {
+    if WorkspaceConfig::exists(&path) {
+        return WorkspaceConfig::load(&path)
+            .await
+            .map_err(|e| format!("{:?}", e));
+    }
+
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let duration = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|e| e.to_string())?;
+    let id = format!("ws_{:x}{:x}", duration.as_secs(), duration.subsec_nanos());
+
+    let config = WorkspaceConfig::new(id, name, path.clone(), color);
+    config.save(&path).await.map_err(|e| format!("{:?}", e))?;
+
+    Ok(config)
 }

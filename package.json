@@ -6,8 +6,8 @@
     "apps/*"
   ],
   "scripts": {
-    "dev": "npm run dev --workspace=apps/desktop",
-    "build": "npm run build --workspace=apps/desktop",
-    "tauri": "npm run tauri --workspace=apps/desktop"
+    "dev": "npm run dev -w apps/desktop",
+    "build": "npm run build -w apps/desktop",
+    "tauri": "npm run tauri -w apps/desktop"
   }
 }

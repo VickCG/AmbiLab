@@ -20,18 +20,28 @@ interface Props {
   onSave: (index: number) => void;
 }
 
-type FileType = "csv" | "parquet" | "sql" | "unknown";
+type FileType = "csv" | "parquet" | "json" | "jsonl" | "sql" | "text" | "unknown";
 
 function getFileType(filename: string): FileType {
   const ext = filename.split(".").pop()?.toLowerCase();
   switch (ext) {
     case "csv":
+    case "tsv":
       return "csv";
     case "parquet":
     case "pq":
       return "parquet";
+    case "json":
+      return "json";
+    case "jsonl":
+    case "ndjson":
+      return "jsonl";
     case "sql":
       return "sql";
+    case "txt":
+    case "md":
+    case "log":
+      return "text";
     default:
       return "unknown";
   }
@@ -57,7 +67,8 @@ function CodeEditor({
   useEffect(() => {
     if (activeFile) {
       const fileType = getFileType(activeFile.name);
-      setShowPanel(fileType !== "unknown");
+      const dataFileTypes: FileType[] = ["csv", "parquet", "json", "jsonl"];
+      setShowPanel(dataFileTypes.includes(fileType));
     } else {
       setShowPanel(false);
     }

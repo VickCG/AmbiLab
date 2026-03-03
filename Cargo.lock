@@ -67,12 +67,18 @@ version = "0.1.0"
 dependencies = [
  "ambilab-core",
  "arrow",
+ "chrono",
  "csv",
+ "futures-util",
+ "parking_lot",
  "parquet",
  "serde",
  "serde_json",
+ "sha2",
  "tauri",
  "tauri-build",
+ "tempfile",
+ "thiserror",
  "tokio",
 ]
 

@@ -1,11 +1,11 @@
-import { useState } from "react";
+import { useState, useEffect, useRef } from "react";
 import { invoke } from "@tauri-apps/api/tauri";
 import FileExplorer from "./components/FileExplorer";
 import CodeEditor from "./components/CodeEditor";
 import AIChat from "./components/AIChat";
 import DataImport from "./components/DataImport";
 import { ImportedFile } from "./types/import";
-import { Workspace } from "./types/workspace";
+import { Workspace, WorkspaceConfig } from "./types/workspace";
 
 interface OpenFile {
   path: string;
@@ -24,6 +24,95 @@ function App() {
   const [importWorkspaceId, setImportWorkspaceId] = useState<string | undefined>();
 
   const activeFile = activeFileIndex >= 0 ? openFiles[activeFileIndex] : null;
+  const saveTimeoutRef = useRef<number | null>(null);
+
+  useEffect(() => {
+    const createConfigsForNewWorkspaces = async () => {
+      for (const workspace of workspaces) {
+        try {
+          await invoke("create_workspace_with_config", {
+            path: workspace.path,
+            name: workspace.name,
+            color: workspace.color,
+          });
+        } catch (err) {
+          console.warn(`Could not create config for ${workspace.name}:`, err);
+        }
+      }
+    };
+
+    if (workspaces.length > 0) {
+      createConfigsForNewWorkspaces();
+    }
+  }, [workspaces]);
+
+  useEffect(() => {
+    if (saveTimeoutRef.current !== null) {
+      clearTimeout(saveTimeoutRef.current);
+    }
+
+    saveTimeoutRef.current = window.setTimeout(() => {
+      const saveWorkspaceConfigs = async () => {
+        for (const workspace of workspaces) {
+          try {
+            const config: WorkspaceConfig = {
+              metadata: {
+                id: workspace.id,
+                name: workspace.name,
+                path: workspace.path,
+                color: workspace.color,
+                created_at: new Date().toISOString(),
+                last_opened: new Date().toISOString(),
+                version: 1,
+              },
+              editor_state: {
+                open_files: openFiles.map((file) => ({
+                  path: file.path,
+                  relative_path: file.path.replace(workspace.path + "/", ""),
+                  content_hash: "",
+                  cursor_position: { line: 0, column: 0 },
+                  scroll_position: { line: 0, column: 0 },
+                  is_dirty: file.isDirty,
+                  last_modified: new Date().toISOString(),
+                })),
+                active_file_index: activeFileIndex,
+                closed_tabs: [],
+              },
+              tree_state: {
+                expanded_folders: [],
+                pinned_items: [],
+                collapsed_workspaces: [],
+              },
+              workspace_settings: {
+                default_query_template: "sql",
+                auto_save_interval_ms: 2000,
+              },
+              ui_state: {
+                sidebar_width: sidebarWidth,
+                chat_width: chatWidth,
+                panel_height: 200,
+              },
+            };
+
+            await invoke("update_workspace_config", {
+              path: workspace.path,
+              config,
+            });
+          } catch (err) {
+            console.error(`Failed to save config for ${workspace.name}:`, err);
+          }
+        }
+      };
+
+      saveWorkspaceConfigs();
+    }, 1000);
+
+    return () => {
+      if (saveTimeoutRef.current !== null) {
+        clearTimeout(saveTimeoutRef.current);
+      }
+    };
+  }, [workspaces, openFiles, activeFileIndex, sidebarWidth, chatWidth]);
 
   const handleAddWorkspace = (workspace: Workspace) => {
     setWorkspaces((prev) => {

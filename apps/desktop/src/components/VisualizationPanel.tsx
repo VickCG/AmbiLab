@@ -33,6 +33,7 @@ function getFileType(filename: string): FileType {
 
   switch (ext) {
     case "csv":
+    case "tsv":
       return "csv";
     case "parquet":
     case "pq":
@@ -40,6 +41,7 @@ function getFileType(filename: string): FileType {
     case "json":
       return "json";
     case "jsonl":
+    case "ndjson":
       return "jsonl";
     case "sql":
       return "sql";
@@ -51,7 +53,7 @@ function getFileType(filename: string): FileType {
 function getViewTitle(fileType: FileType): string {
   switch (fileType) {
     case "csv":
-      return "CSV Data Preview";
+      return "CSV/TSV Data Preview";
     case "parquet":
       return "Parquet Data Preview";
     case "json":
