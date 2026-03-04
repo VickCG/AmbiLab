@@ -45,6 +45,7 @@ impl FileCache {
         self.jsonl.write().insert(path.to_string(), arc.clone());
         Ok(arc)
     }
+
 }
 
 impl Default for FileCache {
@@ -183,3 +184,4 @@ fn jsonl_value(value: Option<&Value>) -> String {
         Some(Value::Object(obj)) => serde_json::to_string(obj).unwrap_or_default(),
     }
 }
+

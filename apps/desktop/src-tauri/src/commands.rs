@@ -1,11 +1,12 @@
 use arrow::array::Array;
+use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
 use std::fs::{self, File};
-use std::io::BufReader;
 use std::path::PathBuf;
+use std::sync::Arc;
 use tauri::State;
 
+use crate::duckdb_state::{parquet_cache_path, DuckDbState};
 use crate::file_cache::{FileCacheState, read_csv_page, read_jsonl_page};
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -163,40 +164,164 @@ pub fn read_parquet(path: String, limit: usize, offset: usize) -> Result<DataPre
     })
 }
 
+/// Two-phase JSON read:
+/// Phase 1 (~50-150ms): return first page immediately from read_json_auto (DuckDB early-exits at LIMIT)
+/// Phase 2 (background): convert JSON → Parquet with SNAPPY, emit json_index_ready with total_rows
+/// All subsequent calls use the Parquet cache: O(1) count, ~20ms reads
 #[tauri::command]
-pub fn read_json(path: String, limit: usize, offset: usize) -> Result<DataPreview, String> {
-    let content = fs::read_to_string(&path).map_err(|e| e.to_string())?;
-    let value: Value = serde_json::from_str(&content).map_err(|e| e.to_string())?;
+pub async fn read_json(
+    path: String,
+    limit: usize,
+    offset: usize,
+    db: State<'_, DuckDbState>,
+    app: tauri::AppHandle,
+) -> Result<DataPreview, String> {
+    let cache_path = parquet_cache_path(&path)?;
 
-    let records = match value {
-        Value::Array(arr) => arr,
-        Value::Object(obj) => vec![Value::Object(obj)],
-        _ => return Err("JSON must be an array or object".to_string()),
-    };
-
-    if records.is_empty() {
-        return Ok(DataPreview {
-            columns: vec![],
-            rows: vec![],
-            total_rows: 0,
-        });
+    if cache_path.exists() {
+        let safe = cache_path.to_string_lossy().replace('\'', "''");
+        let conn = db.conn.lock();
+        return read_parquet_page(&conn, &safe, limit, offset);
     }
 
-    let columns = extract_json_columns(&records[0]);
-    let total_rows = records.len();
+    // First open: return page immediately — lock acquired and released before spawn
+    let page = {
+        let conn = db.conn.lock();
+        query_json_auto(&conn, &path, limit, offset)?
+    };
 
-    let rows: Vec<Vec<String>> = records
-        .into_iter()
-        .skip(offset)
-        .take(limit)
-        .map(|record| extract_json_row(&record, &columns))
-        .collect();
+    // Guard: only one background build per path (DashMap::insert returns None if new)
+    if db.building.insert(path.clone(), ()).is_none() {
+        let (path_c, cache_c, building_c, app_c) = (
+            path,
+            cache_path,
+            Arc::clone(&db.building),
+            app,
+        );
+        tokio::task::spawn_blocking(move || build_and_notify(path_c, cache_c, building_c, app_c));
+    }
 
-    Ok(DataPreview {
-        columns,
-        rows,
-        total_rows,
-    })
+    Ok(page)
+}
+
+fn query_json_auto(
+    conn: &duckdb::Connection,
+    path: &str,
+    limit: usize,
+    offset: usize,
+) -> Result<DataPreview, String> {
+    let safe = path.replace('\'', "''");
+    let mut stmt = conn
+        .prepare(&format!(
+            "SELECT * FROM read_json_auto('{safe}') LIMIT {limit} OFFSET {offset}"
+        ))
+        .map_err(|e| e.to_string())?;
+    let columns = stmt.column_names();
+    let ncols = columns.len();
+    let mut rows: Vec<Vec<String>> = Vec::with_capacity(limit);
+    let mut result = stmt.query([]).map_err(|e| e.to_string())?;
+    while let Some(row) = result.next().map_err(|e| e.to_string())? {
+        let mut data_row: Vec<String> = Vec::with_capacity(ncols);
+        for i in 0..ncols {
+            data_row.push(duckdb_value_to_string(row, i));
+        }
+        rows.push(data_row);
+    }
+    // total_rows=0: signals "loading" — frontend updates via json_index_ready event
+    Ok(DataPreview { columns, rows, total_rows: 0 })
+}
+
+fn read_parquet_page(
+    conn: &duckdb::Connection,
+    safe_cache: &str,
+    limit: usize,
+    offset: usize,
+) -> Result<DataPreview, String> {
+    // O(1) — reads row count from Parquet file footer, no row scan
+    let total_rows: usize = conn
+        .query_row(
+            &format!("SELECT COUNT(*) FROM read_parquet('{safe_cache}')"),
+            [],
+            |row| row.get::<_, i64>(0),
+        )
+        .map_err(|e| e.to_string())? as usize;
+    let mut stmt = conn
+        .prepare(&format!(
+            "SELECT * FROM read_parquet('{safe_cache}') LIMIT {limit} OFFSET {offset}"
+        ))
+        .map_err(|e| e.to_string())?;
+    let columns = stmt.column_names();
+    let ncols = columns.len();
+    let mut rows: Vec<Vec<String>> = Vec::with_capacity(limit);
+    let mut result = stmt.query([]).map_err(|e| e.to_string())?;
+    while let Some(row) = result.next().map_err(|e| e.to_string())? {
+        let mut data_row: Vec<String> = Vec::with_capacity(ncols);
+        for i in 0..ncols {
+            data_row.push(duckdb_value_to_string(row, i));
+        }
+        rows.push(data_row);
+    }
+    Ok(DataPreview { columns, rows, total_rows })
+}
+
+/// Runs in a blocking thread: converts JSON → SNAPPY Parquet, then emits json_index_ready.
+/// Opens its own DuckDB connection — never blocks the foreground query connection.
+fn build_and_notify(
+    path: String,
+    cache_path: PathBuf,
+    building: Arc<DashMap<String, ()>>,
+    app: tauri::AppHandle,
+) {
+    let Ok(conn) = duckdb::Connection::open_in_memory() else { return };
+    let safe_src = path.replace('\'', "''");
+    let safe_dst = cache_path.to_string_lossy().replace('\'', "''");
+    let ok = conn
+        .execute_batch(&format!(
+            "COPY (SELECT * FROM read_json_auto('{safe_src}')) \
+             TO '{safe_dst}' \
+             (FORMAT PARQUET, CODEC 'SNAPPY', ROW_GROUP_SIZE 122880, STATISTICS TRUE);"
+        ))
+        .is_ok();
+    building.remove(&path);
+    if !ok {
+        return;
+    }
+    let total: i64 = conn
+        .query_row(
+            &format!("SELECT COUNT(*) FROM read_parquet('{safe_dst}')"),
+            [],
+            |r| r.get(0),
+        )
+        .unwrap_or(0);
+    #[derive(Serialize, Clone)]
+    struct Payload { path: String, total_rows: i64 }
+    let _ = app.emit_all("json_index_ready", Payload { path, total_rows: total });
+}
+
+fn duckdb_value_to_string(row: &duckdb::Row<'_>, idx: usize) -> String {
+    use duckdb::types::ValueRef;
+    match row.get_ref(idx) {
+        Err(_) => "NULL".to_string(),
+        Ok(vref) => match vref {
+            ValueRef::Null => "NULL".to_string(),
+            ValueRef::Boolean(b) => b.to_string(),
+            ValueRef::TinyInt(n) => n.to_string(),
+            ValueRef::SmallInt(n) => n.to_string(),
+            ValueRef::Int(n) => n.to_string(),
+            ValueRef::BigInt(n) => n.to_string(),
+            ValueRef::HugeInt(n) => n.to_string(),
+            ValueRef::UTinyInt(n) => n.to_string(),
+            ValueRef::USmallInt(n) => n.to_string(),
+            ValueRef::UInt(n) => n.to_string(),
+            ValueRef::UBigInt(n) => n.to_string(),
+            ValueRef::Float(n) => n.to_string(),
+            ValueRef::Double(n) => n.to_string(),
+            ValueRef::Decimal(n) => n.to_string(),
+            ValueRef::Text(b) => String::from_utf8_lossy(b).into_owned(),
+            ValueRef::Blob(b) => format!("<blob:{}>", b.len()),
+            _ => "...".to_string(),
+        },
+    }
 }
 
 #[tauri::command]
@@ -214,35 +339,6 @@ pub fn read_jsonl(
         rows,
         total_rows: index.total_rows,
     })
-}
-
-fn extract_json_columns(value: &Value) -> Vec<String> {
-    match value {
-        Value::Object(map) => map.keys().cloned().collect(),
-        _ => vec!["value".to_string()],
-    }
-}
-
-fn extract_json_row(value: &Value, columns: &[String]) -> Vec<String> {
-    match value {
-        Value::Object(map) => columns
-            .iter()
-            .map(|col| format_json_value(map.get(col)))
-            .collect(),
-        _ => vec![format_json_value(Some(value))],
-    }
-}
-
-fn format_json_value(value: Option<&Value>) -> String {
-    match value {
-        None => "NULL".to_string(),
-        Some(Value::Null) => "NULL".to_string(),
-        Some(Value::String(s)) => s.clone(),
-        Some(Value::Number(n)) => n.to_string(),
-        Some(Value::Bool(b)) => b.to_string(),
-        Some(Value::Array(arr)) => serde_json::to_string(arr).unwrap_or_default(),
-        Some(Value::Object(obj)) => serde_json::to_string(obj).unwrap_or_default(),
-    }
 }
 
 fn format_array_value(array: &dyn Array, idx: usize) -> String {
