@@ -86,3 +86,10 @@ export interface UiState {
   chat_width: number;
   panel_height: number;
 }
+
+/** Top-level workspace manifest stored at `<workspace>/workspace.json`. */
+export interface WorkspaceRoot {
+  workspace_version: number;
+  created_at: string;
+  projects: string[];
+}

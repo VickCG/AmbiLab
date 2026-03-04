@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, useCallback } from "react";
 import { invoke } from "@tauri-apps/api/tauri";
 import FileExplorer from "./components/FileExplorer";
 import CodeEditor from "./components/CodeEditor";
@@ -22,6 +22,8 @@ function App() {
   const [chatWidth, setChatWidth] = useState(350);
   const [showImportModal, setShowImportModal] = useState(false);
   const [importWorkspaceId, setImportWorkspaceId] = useState<string | undefined>();
+  const [isDragging, setIsDragging] = useState(false);
+  const dragCounterRef = useRef(0);
 
   const activeFile = activeFileIndex >= 0 ? openFiles[activeFileIndex] : null;
   const saveTimeoutRef = useRef<number | null>(null);
@@ -184,8 +186,54 @@ function App() {
     }
   };
 
+  const DATA_EXTS = new Set(["csv", "tsv", "parquet", "pq", "json", "jsonl", "ndjson"]);
+
+  const handleDragEnter = useCallback((e: React.DragEvent) => {
+    e.preventDefault();
+    dragCounterRef.current++;
+    if (e.dataTransfer.items.length > 0) setIsDragging(true);
+  }, []);
+
+  const handleDragLeave = useCallback((e: React.DragEvent) => {
+    e.preventDefault();
+    dragCounterRef.current--;
+    if (dragCounterRef.current === 0) setIsDragging(false);
+  }, []);
+
+  const handleDragOver = useCallback((e: React.DragEvent) => {
+    e.preventDefault();
+  }, []);
+
+  const handleDrop = useCallback((e: React.DragEvent) => {
+    e.preventDefault();
+    dragCounterRef.current = 0;
+    setIsDragging(false);
+    Array.from(e.dataTransfer.files).forEach((file) => {
+      const ext = file.name.split(".").pop()?.toLowerCase() ?? "";
+      if (!DATA_EXTS.has(ext)) return;
+      const path = (file as any).path as string | undefined;
+      if (!path) return;
+      handleFileOpen(path, file.name, "");
+    });
+  }, [handleFileOpen]);
+
   return (
-    <div className="app">
+    <div
+      className="app"
+      onDragEnter={handleDragEnter}
+      onDragLeave={handleDragLeave}
+      onDragOver={handleDragOver}
+      onDrop={handleDrop}
+    >
+      {isDragging && (
+        <div className="drop-overlay">
+          <div className="drop-overlay-content">
+            <div className="drop-overlay-icon">⬇</div>
+            <p className="drop-overlay-title">Drop dataset to open</p>
+            <p className="drop-overlay-formats">CSV · Parquet · JSON · JSONL</p>
+          </div>
+        </div>
+      )}
       <div className="sidebar" style={{ width: sidebarWidth }}>
         <FileExplorer
           workspaces={workspaces}

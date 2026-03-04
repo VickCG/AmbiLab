@@ -162,9 +162,10 @@ function CodeEditor({
           <div className="welcome-logo">{"</>"}</div>
           <h1 className="welcome-title">AmbiLab IDE</h1>
           <p className="welcome-subtitle">AI-Powered Local Analytics IDE</p>
-          <p style={{ color: "var(--text-muted)", fontSize: "12px" }}>
-            Open a folder to get started
+          <p className="welcome-drop-hint">
+            Drop a dataset here to get started
           </p>
+          <p className="welcome-formats">CSV · Parquet · JSON · JSONL</p>
         </div>
       </div>
     );

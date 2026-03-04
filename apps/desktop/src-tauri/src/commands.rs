@@ -116,7 +116,7 @@ pub async fn read_csv(
             ))
             .map_err(|e| e.to_string())?;
 
-        let columns = stmt.column_names();
+        let columns = safe_column_names(&stmt);
         let ncols = columns.len();
         let mut rows: Vec<Vec<String>> = Vec::with_capacity(limit);
         let mut result = stmt.query([]).map_err(|e| e.to_string())?;
@@ -268,7 +268,7 @@ fn query_json_auto(
             "SELECT * FROM read_json_auto('{safe}', maximum_object_size=268435456) LIMIT {limit} OFFSET {offset}"
         ))
         .map_err(|e| e.to_string())?;
-    let columns = stmt.column_names();
+    let columns = safe_column_names(&stmt);
     let ncols = columns.len();
     let mut rows: Vec<Vec<String>> = Vec::with_capacity(limit);
     let mut result = stmt.query([]).map_err(|e| e.to_string())?;
@@ -302,7 +302,7 @@ fn read_parquet_page(
             "SELECT * FROM read_parquet('{safe_cache}') LIMIT {limit} OFFSET {offset}"
         ))
         .map_err(|e| e.to_string())?;
-    let columns = stmt.column_names();
+    let columns = safe_column_names(&stmt);
     let ncols = columns.len();
     let mut rows: Vec<Vec<String>> = Vec::with_capacity(limit);
     let mut result = stmt.query([]).map_err(|e| e.to_string())?;
@@ -377,7 +377,7 @@ pub async fn read_jsonl(
             ))
             .map_err(|e| e.to_string())?;
 
-        let columns = stmt.column_names();
+        let columns = safe_column_names(&stmt);
         let ncols = columns.len();
         let mut rows: Vec<Vec<String>> = Vec::with_capacity(limit);
         let mut result = stmt.query([]).map_err(|e| e.to_string())?;
@@ -408,6 +408,21 @@ pub async fn read_jsonl(
     })
     .await
     .map_err(|e| e.to_string())?
+}
+
+/// Safe alternative to duckdb-rs `Statement::column_names()`.
+/// The duckdb-rs method calls `column_name(i).unwrap()` internally, which panics when
+/// DuckDB returns a NULL pointer for the column name (empty header, encoding edge case, etc.).
+/// This version falls back to "col_N" instead of panicking.
+fn safe_column_names(stmt: &duckdb::Statement<'_>) -> Vec<String> {
+    let n = stmt.column_count();
+    (0..n)
+        .map(|i| {
+            stmt.column_name(i)
+                .map(|s| s.clone())
+                .unwrap_or_else(|_| format!("col_{i}"))
+        })
+        .collect()
 }
 
 fn duckdb_value_to_string(row: &duckdb::Row<'_>, idx: usize) -> String {

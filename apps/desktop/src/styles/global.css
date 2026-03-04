@@ -1027,3 +1027,58 @@ body {
   color: var(--text-muted);
   font-size: 13px;
 }
+
+/* Drop overlay — appears over entire app when dragging a file */
+.drop-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 9999;
+  background: rgba(0, 0, 0, 0.65);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  pointer-events: none;
+}
+
+.drop-overlay-content {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+  border: 2px dashed var(--accent-color);
+  border-radius: 12px;
+  padding: 48px 64px;
+  background: rgba(0, 120, 212, 0.08);
+}
+
+.drop-overlay-icon {
+  font-size: 40px;
+  color: var(--accent-color);
+}
+
+.drop-overlay-title {
+  font-size: 20px;
+  font-weight: 600;
+  color: var(--text-primary);
+  margin: 0;
+}
+
+.drop-overlay-formats {
+  font-size: 13px;
+  color: var(--text-secondary);
+  margin: 0;
+  letter-spacing: 0.04em;
+}
+
+/* Welcome screen hints */
+.welcome-drop-hint {
+  font-size: 13px;
+  color: var(--text-secondary);
+  margin-bottom: 6px;
+}
+
+.welcome-formats {
+  font-size: 11px;
+  color: var(--text-muted);
+  letter-spacing: 0.05em;
+}

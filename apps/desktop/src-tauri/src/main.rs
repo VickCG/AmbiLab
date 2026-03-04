@@ -4,8 +4,11 @@ mod autosave;
 mod commands;
 mod duckdb_state;
 mod import;
+mod project;
+mod session;
 mod workspace;
 mod workspace_config;
+mod workspace_root;
 
 use autosave::AutoSaveManager;
 use duckdb_state::DuckDbState;
@@ -47,6 +50,18 @@ fn main() {
             workspace::create_workspaces,
             workspace::get_workspace_info,
             workspace::rename_workspace,
+            workspace_root::initialize_workspace,
+            workspace_root::detect_workspace,
+            workspace_root::load_workspace_root,
+            workspace_root::save_workspace_root,
+            project::create_project,
+            project::load_project,
+            project::save_project,
+            project::list_projects,
+            project::archive_project,
+            project::finalize_project,
+            session::load_session,
+            session::save_session,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
