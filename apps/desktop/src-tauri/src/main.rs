@@ -3,14 +3,12 @@
 mod autosave;
 mod commands;
 mod duckdb_state;
-mod file_cache;
 mod import;
 mod workspace;
 mod workspace_config;
 
 use autosave::AutoSaveManager;
 use duckdb_state::DuckDbState;
-use file_cache::{FileCache, FileCacheState};
 use std::sync::Arc;
 
 fn main() {
@@ -26,7 +24,6 @@ fn main() {
             }
         })
         .manage(commands::AutoSaveState(autosave_manager))
-        .manage(FileCacheState(Arc::new(FileCache::new())))
         .manage(duck_db)
         .invoke_handler(tauri::generate_handler![
             commands::read_dir,

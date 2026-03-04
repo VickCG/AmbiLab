@@ -1,5 +1,6 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { invoke } from "@tauri-apps/api/tauri";
+import { useVirtualizer } from "@tanstack/react-virtual";
 import { VscChevronLeft, VscChevronRight } from "react-icons/vsc";
 
 interface DataPreview {
@@ -29,6 +30,8 @@ const COMMAND_MAP: Record<string, string> = {
   jsonl: "read_jsonl",
 };
 
+const ROW_HEIGHT = 32;
+
 function DataTableView({ filePath, fileType, onDataLoaded }: Props) {
   const [data, setData] = useState<DataPreview | null>(null);
   const [loading, setLoading] = useState(true);
@@ -36,6 +39,8 @@ function DataTableView({ filePath, fileType, onDataLoaded }: Props) {
   const [page, setPage] = useState(0);
   const [sortColumn, setSortColumn] = useState<number | null>(null);
   const [sortAsc, setSortAsc] = useState(true);
+
+  const parentRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     loadData();
@@ -72,7 +77,7 @@ function DataTableView({ filePath, fileType, onDataLoaded }: Props) {
     }
   };
 
-  const sortedRows = () => {
+  const sortedRows = (): string[][] => {
     if (!data || sortColumn === null) return data?.rows || [];
 
     return [...data.rows].sort((a, b) => {
@@ -86,50 +91,55 @@ function DataTableView({ filePath, fileType, onDataLoaded }: Props) {
         return sortAsc ? aNum - bNum : bNum - aNum;
       }
 
-      return sortAsc
-        ? aVal.localeCompare(bVal)
-        : bVal.localeCompare(aVal);
+      return sortAsc ? aVal.localeCompare(bVal) : bVal.localeCompare(aVal);
     });
   };
+
+  const rows = sortedRows();
+
+  const rowVirtualizer = useVirtualizer({
+    count: rows.length,
+    getScrollElement: () => parentRef.current,
+    estimateSize: () => ROW_HEIGHT,
+    overscan: 5,
+  });
+
+  const virtualItems = rowVirtualizer.getVirtualItems();
+  const paddingTop = virtualItems.length > 0 ? virtualItems[0].start : 0;
+  const paddingBottom =
+    virtualItems.length > 0
+      ? rowVirtualizer.getTotalSize() - virtualItems[virtualItems.length - 1].end
+      : 0;
 
   const totalPages = data ? Math.ceil(data.total_rows / PAGE_SIZE) : 0;
 
   if (loading && !data) {
-    return (
-      <div className="data-table-loading">
-        Loading data...
-      </div>
-    );
+    return <div className="data-table-loading">Loading data...</div>;
   }
 
   if (error) {
-    return (
-      <div className="data-table-error">
-        Error: {error}
-      </div>
-    );
+    return <div className="data-table-error">Error: {error}</div>;
   }
 
   if (!data || data.columns.length === 0) {
-    return (
-      <div className="data-table-empty">
-        No data available
-      </div>
-    );
+    return <div className="data-table-empty">No data available</div>;
   }
 
   return (
     <div className="data-table-container">
       <div className="data-table-info">
         <span className="data-table-rows">
-          {data.total_rows.toLocaleString()} rows
+          {data.total_rows > 0
+            ? data.total_rows.toLocaleString() + " rows"
+            : loading
+            ? "counting rows…"
+            : "rows"}
         </span>
-        <span className="data-table-cols">
-          {data.columns.length} columns
-        </span>
+        <span className="data-table-cols">{data.columns.length} columns</span>
       </div>
 
-      <div className="data-table-wrapper">
+      {/* Virtualized scroll container — always ~5 DOM rows regardless of dataset */}
+      <div ref={parentRef} className="data-table-wrapper">
         <table className="data-table">
           <thead>
             <tr>
@@ -142,31 +152,48 @@ function DataTableView({ filePath, fileType, onDataLoaded }: Props) {
                 >
                   {col}
                   {sortColumn === idx && (
-                    <span className="sort-indicator">
-                      {sortAsc ? " ↑" : " ↓"}
-                    </span>
+                    <span className="sort-indicator">{sortAsc ? " ↑" : " ↓"}</span>
                   )}
                 </th>
               ))}
             </tr>
           </thead>
           <tbody>
-            {sortedRows().map((row, rowIdx) => (
-              <tr key={rowIdx}>
-                <td className="data-table-row-num">
-                  {page * PAGE_SIZE + rowIdx + 1}
-                </td>
-                {row.map((cell, cellIdx) => (
-                  <td key={cellIdx} title={cell}>
-                    {cell === "NULL" ? (
-                      <span className="null-value">NULL</span>
-                    ) : (
-                      cell
-                    )}
-                  </td>
-                ))}
+            {paddingTop > 0 && (
+              <tr>
+                <td
+                  style={{ height: `${paddingTop}px`, padding: 0, border: "none" }}
+                  colSpan={data.columns.length + 1}
+                />
               </tr>
-            ))}
+            )}
+            {virtualItems.map((virtualRow) => {
+              const row = rows[virtualRow.index];
+              return (
+                <tr key={virtualRow.index} style={{ height: `${ROW_HEIGHT}px` }}>
+                  <td className="data-table-row-num">
+                    {page * PAGE_SIZE + virtualRow.index + 1}
+                  </td>
+                  {row.map((cell, cellIdx) => (
+                    <td key={cellIdx} title={cell}>
+                      {cell === "NULL" ? (
+                        <span className="null-value">NULL</span>
+                      ) : (
+                        cell
+                      )}
+                    </td>
+                  ))}
+                </tr>
+              );
+            })}
+            {paddingBottom > 0 && (
+              <tr>
+                <td
+                  style={{ height: `${paddingBottom}px`, padding: 0, border: "none" }}
+                  colSpan={data.columns.length + 1}
+                />
+              </tr>
+            )}
           </tbody>
         </table>
       </div>

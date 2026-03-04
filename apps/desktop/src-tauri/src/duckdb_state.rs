@@ -7,19 +7,35 @@ use std::sync::Arc;
 use std::time::SystemTime;
 
 pub struct DuckDbState {
-    pub conn: Mutex<Connection>,
+    /// Arc so inner connection can be cloned into spawn_blocking closures.
+    pub conn: Arc<Mutex<Connection>>,
     /// Tracks paths currently being converted to avoid duplicate background builds.
     pub building: Arc<DashMap<String, ()>>,
+    /// Session-level row count cache: path → total_rows.
+    /// Populated on first full-scan; valid for the lifetime of the process.
+    pub row_counts: Arc<DashMap<String, usize>>,
 }
 
 impl DuckDbState {
     pub fn new() -> Result<Self, String> {
         let conn = Connection::open_in_memory().map_err(|e| e.to_string())?;
-        conn.execute_batch("SET memory_limit = '512MB';")
-            .map_err(|e| e.to_string())?;
+
+        let threads = std::thread::available_parallelism()
+            .map(|n| (n.get()).saturating_sub(1).max(1))
+            .unwrap_or(1);
+
+        conn.execute_batch(&format!(
+            "PRAGMA threads = {threads}; \
+             SET memory_limit = '4GB'; \
+             SET enable_object_cache = true; \
+             SET enable_progress_bar = false;"
+        ))
+        .map_err(|e| e.to_string())?;
+
         Ok(Self {
-            conn: Mutex::new(conn),
+            conn: Arc::new(Mutex::new(conn)),
             building: Arc::new(DashMap::new()),
+            row_counts: Arc::new(DashMap::new()),
         })
     }
 }

@@ -1,4 +1,5 @@
 use crate::workspace_config::WorkspaceConfig;
+use futures::future::join_all;
 use parking_lot::RwLock;
 use std::sync::Arc;
 use std::time::Duration;
@@ -45,7 +46,7 @@ impl AutoSaveManager {
                         })
                         .collect();
 
-                    futures_util::future::join_all(futures).await;
+                    join_all(futures).await;
                 }
             }
         });

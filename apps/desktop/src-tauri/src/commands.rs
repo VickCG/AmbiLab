@@ -4,10 +4,9 @@ use serde::{Deserialize, Serialize};
 use std::fs::{self, File};
 use std::path::PathBuf;
 use std::sync::Arc;
-use tauri::State;
+use tauri::{Manager, State};
 
 use crate::duckdb_state::{parquet_cache_path, DuckDbState};
-use crate::file_cache::{FileCacheState, read_csv_page, read_jsonl_page};
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct FileEntry {
@@ -55,12 +54,10 @@ pub fn read_dir(path: String) -> Result<Vec<FileEntry>, String> {
         .collect::<Vec<_>>();
 
     let mut sorted = entries;
-    sorted.sort_by(|a, b| {
-        match (a.is_dir, b.is_dir) {
-            (true, false) => std::cmp::Ordering::Less,
-            (false, true) => std::cmp::Ordering::Greater,
-            _ => a.name.to_lowercase().cmp(&b.name.to_lowercase()),
-        }
+    sorted.sort_by(|a, b| match (a.is_dir, b.is_dir) {
+        (true, false) => std::cmp::Ordering::Less,
+        (false, true) => std::cmp::Ordering::Greater,
+        _ => a.name.to_lowercase().cmp(&b.name.to_lowercase()),
     });
 
     Ok(sorted)
@@ -96,77 +93,124 @@ pub fn analyze_sql(query: String) -> Result<AnalysisResult, String> {
     })
 }
 
+/// DuckDB-backed CSV reader.
+/// Phase 1 (always fast): DuckDB SIMD scan with LIMIT/OFFSET.
+/// Row count: served from session cache; first access does a full COUNT(*) scan.
 #[tauri::command]
-pub fn read_csv(
+pub async fn read_csv(
     path: String,
     limit: usize,
     offset: usize,
-    cache: State<'_, FileCacheState>,
+    db: State<'_, DuckDbState>,
 ) -> Result<DataPreview, String> {
-    let index = cache.0.get_or_build_csv(&path)?;
-    let page = if limit > 0 { offset / limit } else { 0 };
-    let rows = read_csv_page(&path, &index, page)?;
-    Ok(DataPreview {
-        columns: index.columns.clone(),
-        rows,
-        total_rows: index.total_rows,
+    let conn = Arc::clone(&db.conn);
+    let row_counts = Arc::clone(&db.row_counts);
+
+    tokio::task::spawn_blocking(move || {
+        let conn = conn.lock();
+        let safe = path.replace('\'', "''");
+
+        let mut stmt = conn
+            .prepare(&format!(
+                "SELECT * FROM read_csv_auto('{safe}') LIMIT {limit} OFFSET {offset}"
+            ))
+            .map_err(|e| e.to_string())?;
+
+        let columns = stmt.column_names();
+        let ncols = columns.len();
+        let mut rows: Vec<Vec<String>> = Vec::with_capacity(limit);
+        let mut result = stmt.query([]).map_err(|e| e.to_string())?;
+
+        while let Some(row) = result.next().map_err(|e| e.to_string())? {
+            let mut data_row: Vec<String> = Vec::with_capacity(ncols);
+            for i in 0..ncols {
+                data_row.push(duckdb_value_to_string(row, i));
+            }
+            rows.push(data_row);
+        }
+
+        // Row count: cache hit is O(1); miss does a full DuckDB SIMD scan once.
+        let total_rows = if let Some(count) = row_counts.get(&path) {
+            *count
+        } else {
+            let count: usize = conn
+                .query_row(
+                    &format!("SELECT COUNT(*) FROM read_csv_auto('{safe}')"),
+                    [],
+                    |r| r.get::<_, i64>(0),
+                )
+                .map_err(|e| e.to_string())? as usize;
+            row_counts.insert(path, count);
+            count
+        };
+
+        Ok(DataPreview { columns, rows, total_rows })
     })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
+/// Arrow-backed Parquet reader with spawn_blocking to avoid blocking the tokio runtime.
+/// Total row count read from Parquet file footer — O(1), no scan.
 #[tauri::command]
-pub fn read_parquet(path: String, limit: usize, offset: usize) -> Result<DataPreview, String> {
-    use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+pub async fn read_parquet(
+    path: String,
+    limit: usize,
+    offset: usize,
+) -> Result<DataPreview, String> {
+    tokio::task::spawn_blocking(move || {
+        use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 
-    let file = File::open(&path).map_err(|e| e.to_string())?;
-    let builder = ParquetRecordBatchReaderBuilder::try_new(file).map_err(|e| e.to_string())?;
+        let file = File::open(&path).map_err(|e| e.to_string())?;
+        let builder =
+            ParquetRecordBatchReaderBuilder::try_new(file).map_err(|e| e.to_string())?;
 
-    let total_rows = builder.metadata().file_metadata().num_rows() as usize;
-    let columns: Vec<String> = builder
-        .schema()
-        .fields()
-        .iter()
-        .map(|f| f.name().clone())
-        .collect();
+        let total_rows = builder.metadata().file_metadata().num_rows() as usize;
+        let columns: Vec<String> = builder
+            .schema()
+            .fields()
+            .iter()
+            .map(|f| f.name().clone())
+            .collect();
 
-    let reader = builder.build().map_err(|e| e.to_string())?;
+        let reader = builder.build().map_err(|e| e.to_string())?;
 
-    let mut rows: Vec<Vec<String>> = Vec::with_capacity(limit);
-    let mut rows_seen: usize = 0;
+        let mut rows: Vec<Vec<String>> = Vec::with_capacity(limit);
+        let mut rows_seen: usize = 0;
 
-    'outer: for batch_result in reader {
-        let batch = batch_result.map_err(|e| e.to_string())?;
-        let num_rows = batch.num_rows();
+        'outer: for batch_result in reader {
+            let batch = batch_result.map_err(|e| e.to_string())?;
+            let num_rows = batch.num_rows();
 
-        if rows_seen + num_rows <= offset {
-            rows_seen += num_rows;
-            continue;
-        }
+            if rows_seen + num_rows <= offset {
+                rows_seen += num_rows;
+                continue;
+            }
 
-        for row_idx in 0..num_rows {
-            if rows_seen >= offset && rows.len() < limit {
-                let mut row: Vec<String> = Vec::with_capacity(batch.num_columns());
-                for col_idx in 0..batch.num_columns() {
-                    row.push(format_array_value(batch.column(col_idx).as_ref(), row_idx));
+            for row_idx in 0..num_rows {
+                if rows_seen >= offset && rows.len() < limit {
+                    let mut row: Vec<String> = Vec::with_capacity(batch.num_columns());
+                    for col_idx in 0..batch.num_columns() {
+                        row.push(format_array_value(batch.column(col_idx).as_ref(), row_idx));
+                    }
+                    rows.push(row);
                 }
-                rows.push(row);
-            }
-            rows_seen += 1;
-            if rows.len() >= limit {
-                break 'outer;
+                rows_seen += 1;
+                if rows.len() >= limit {
+                    break 'outer;
+                }
             }
         }
-    }
 
-    Ok(DataPreview {
-        columns,
-        rows,
-        total_rows,
+        Ok(DataPreview { columns, rows, total_rows })
     })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 /// Two-phase JSON read:
 /// Phase 1 (~50-150ms): return first page immediately from read_json_auto (DuckDB early-exits at LIMIT)
-/// Phase 2 (background): convert JSON → Parquet with SNAPPY, emit json_index_ready with total_rows
+/// Phase 2 (background): convert JSON → Parquet with ZSTD, emit json_index_ready with total_rows
 /// All subsequent calls use the Parquet cache: O(1) count, ~20ms reads
 #[tauri::command]
 pub async fn read_json(
@@ -177,20 +221,28 @@ pub async fn read_json(
     app: tauri::AppHandle,
 ) -> Result<DataPreview, String> {
     let cache_path = parquet_cache_path(&path)?;
+    let conn = Arc::clone(&db.conn);
 
     if cache_path.exists() {
         let safe = cache_path.to_string_lossy().replace('\'', "''");
-        let conn = db.conn.lock();
-        return read_parquet_page(&conn, &safe, limit, offset);
+        return tokio::task::spawn_blocking(move || {
+            let conn = conn.lock();
+            read_parquet_page(&conn, &safe, limit, offset)
+        })
+        .await
+        .map_err(|e| e.to_string())?;
     }
 
-    // First open: return page immediately — lock acquired and released before spawn
-    let page = {
-        let conn = db.conn.lock();
-        query_json_auto(&conn, &path, limit, offset)?
-    };
+    // First open: return page immediately on a blocking thread, never block tokio.
+    let path_for_query = path.clone();
+    let page = tokio::task::spawn_blocking(move || {
+        let conn = conn.lock();
+        query_json_auto(&conn, &path_for_query, limit, offset)
+    })
+    .await
+    .map_err(|e| e.to_string())??;
 
-    // Guard: only one background build per path (DashMap::insert returns None if new)
+    // Guard: only one background build per path.
     if db.building.insert(path.clone(), ()).is_none() {
         let (path_c, cache_c, building_c, app_c) = (
             path,
@@ -213,7 +265,7 @@ fn query_json_auto(
     let safe = path.replace('\'', "''");
     let mut stmt = conn
         .prepare(&format!(
-            "SELECT * FROM read_json_auto('{safe}') LIMIT {limit} OFFSET {offset}"
+            "SELECT * FROM read_json_auto('{safe}', maximum_object_size=268435456) LIMIT {limit} OFFSET {offset}"
         ))
         .map_err(|e| e.to_string())?;
     let columns = stmt.column_names();
@@ -264,7 +316,7 @@ fn read_parquet_page(
     Ok(DataPreview { columns, rows, total_rows })
 }
 
-/// Runs in a blocking thread: converts JSON → SNAPPY Parquet, then emits json_index_ready.
+/// Runs in a blocking thread: converts JSON → ZSTD Parquet, then emits json_index_ready.
 /// Opens its own DuckDB connection — never blocks the foreground query connection.
 fn build_and_notify(
     path: String,
@@ -272,14 +324,16 @@ fn build_and_notify(
     building: Arc<DashMap<String, ()>>,
     app: tauri::AppHandle,
 ) {
-    let Ok(conn) = duckdb::Connection::open_in_memory() else { return };
+    let Ok(conn) = duckdb::Connection::open_in_memory() else {
+        return;
+    };
     let safe_src = path.replace('\'', "''");
     let safe_dst = cache_path.to_string_lossy().replace('\'', "''");
     let ok = conn
         .execute_batch(&format!(
-            "COPY (SELECT * FROM read_json_auto('{safe_src}')) \
+            "COPY (SELECT * FROM read_json_auto('{safe_src}', maximum_object_size=268435456)) \
              TO '{safe_dst}' \
-             (FORMAT PARQUET, CODEC 'SNAPPY', ROW_GROUP_SIZE 122880, STATISTICS TRUE);"
+             (FORMAT PARQUET, CODEC 'ZSTD', COMPRESSION_LEVEL 3, ROW_GROUP_SIZE 122880, STATISTICS TRUE);"
         ))
         .is_ok();
     building.remove(&path);
@@ -294,8 +348,66 @@ fn build_and_notify(
         )
         .unwrap_or(0);
     #[derive(Serialize, Clone)]
-    struct Payload { path: String, total_rows: i64 }
+    struct Payload {
+        path: String,
+        total_rows: i64,
+    }
     let _ = app.emit_all("json_index_ready", Payload { path, total_rows: total });
+}
+
+/// DuckDB-backed JSONL (newline-delimited JSON) reader.
+/// Uses read_ndjson_auto for explicit NDJSON parsing with SIMD acceleration.
+#[tauri::command]
+pub async fn read_jsonl(
+    path: String,
+    limit: usize,
+    offset: usize,
+    db: State<'_, DuckDbState>,
+) -> Result<DataPreview, String> {
+    let conn = Arc::clone(&db.conn);
+    let row_counts = Arc::clone(&db.row_counts);
+
+    tokio::task::spawn_blocking(move || {
+        let conn = conn.lock();
+        let safe = path.replace('\'', "''");
+
+        let mut stmt = conn
+            .prepare(&format!(
+                "SELECT * FROM read_ndjson_auto('{safe}', maximum_object_size=268435456) LIMIT {limit} OFFSET {offset}"
+            ))
+            .map_err(|e| e.to_string())?;
+
+        let columns = stmt.column_names();
+        let ncols = columns.len();
+        let mut rows: Vec<Vec<String>> = Vec::with_capacity(limit);
+        let mut result = stmt.query([]).map_err(|e| e.to_string())?;
+
+        while let Some(row) = result.next().map_err(|e| e.to_string())? {
+            let mut data_row: Vec<String> = Vec::with_capacity(ncols);
+            for i in 0..ncols {
+                data_row.push(duckdb_value_to_string(row, i));
+            }
+            rows.push(data_row);
+        }
+
+        let total_rows = if let Some(count) = row_counts.get(&path) {
+            *count
+        } else {
+            let count: usize = conn
+                .query_row(
+                    &format!("SELECT COUNT(*) FROM read_ndjson_auto('{safe}', maximum_object_size=268435456)"),
+                    [],
+                    |r| r.get::<_, i64>(0),
+                )
+                .map_err(|e| e.to_string())? as usize;
+            row_counts.insert(path, count);
+            count
+        };
+
+        Ok(DataPreview { columns, rows, total_rows })
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 fn duckdb_value_to_string(row: &duckdb::Row<'_>, idx: usize) -> String {
@@ -322,23 +434,6 @@ fn duckdb_value_to_string(row: &duckdb::Row<'_>, idx: usize) -> String {
             _ => "...".to_string(),
         },
     }
-}
-
-#[tauri::command]
-pub fn read_jsonl(
-    path: String,
-    limit: usize,
-    offset: usize,
-    cache: State<'_, FileCacheState>,
-) -> Result<DataPreview, String> {
-    let index = cache.0.get_or_build_jsonl(&path)?;
-    let page = if limit > 0 { offset / limit } else { 0 };
-    let rows = read_jsonl_page(&path, &index, page)?;
-    Ok(DataPreview {
-        columns: index.columns.clone(),
-        rows,
-        total_rows: index.total_rows,
-    })
 }
 
 fn format_array_value(array: &dyn Array, idx: usize) -> String {
@@ -382,7 +477,6 @@ fn format_array_value(array: &dyn Array, idx: usize) -> String {
 
 use crate::autosave::AutoSaveManager;
 use crate::workspace_config::WorkspaceConfig;
-use std::sync::Arc;
 
 pub struct AutoSaveState(pub Arc<AutoSaveManager>);
 
