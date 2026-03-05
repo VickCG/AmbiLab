@@ -60,7 +60,12 @@ impl<S: CanParse> Pipeline<S> {
             return Err(ParseError::MultipleStatements.into());
         }
 
-        let ast = Arc::new(statements.into_iter().next().unwrap());
+        let ast = Arc::new(
+            statements
+                .into_iter()
+                .next()
+                .ok_or(ParseError::EmptyQuery)?,
+        );
         let tables = extract_tables(&ast);
         let columns = extract_columns(&ast);
 

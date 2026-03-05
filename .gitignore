@@ -39,3 +39,6 @@ npm-debug.log*
 # Test/Coverage
 coverage/
 *.profraw
+
+# Generated test data
+data-test/
