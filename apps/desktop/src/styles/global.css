@@ -689,10 +689,13 @@ body {
 .data-table-wrapper {
   flex: 1;
   overflow: auto;
+  will-change: scroll-position;
+  -webkit-overflow-scrolling: touch;
 }
 
 .data-table {
-  width: 100%;
+  table-layout: fixed;
+  min-width: 100%;
   border-collapse: collapse;
   font-size: 12px;
   font-family: "Fira Code", "Consolas", monospace;
@@ -704,7 +707,6 @@ body {
   text-align: left;
   border-bottom: 1px solid var(--border-color);
   white-space: nowrap;
-  max-width: 300px;
   overflow: hidden;
   text-overflow: ellipsis;
 }
@@ -716,6 +718,32 @@ body {
   top: 0;
   cursor: pointer;
   user-select: none;
+  position: relative;
+}
+
+.th-label {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  padding-right: 8px;
+}
+
+.col-resize-handle {
+  position: absolute;
+  top: 0;
+  right: 0;
+  width: 4px;
+  height: 100%;
+  cursor: col-resize;
+  user-select: none;
+  z-index: 1;
+}
+
+.col-resize-handle:hover,
+.col-resize-handle:active {
+  background: var(--accent-color);
+  opacity: 0.6;
 }
 
 .data-table th:hover {

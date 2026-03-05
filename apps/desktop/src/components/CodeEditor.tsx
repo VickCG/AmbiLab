@@ -1,8 +1,11 @@
-import { useState, useEffect } from "react";
-import Editor from "@monaco-editor/react";
+import { useState, useEffect, useRef, useCallback } from "react";
+import Editor, { loader } from "@monaco-editor/react";
+import * as monaco from "monaco-editor";
 import { invoke } from "@tauri-apps/api/tauri";
 import { VscClose } from "react-icons/vsc";
 import VisualizationPanel from "./VisualizationPanel";
+
+loader.config({ monaco });
 
 interface OpenFile {
   path: string;
@@ -49,7 +52,7 @@ function getFileType(filename: string): FileType {
 
 const DEFAULT_PANEL_HEIGHT = 200;
 const MIN_PANEL_HEIGHT = 100;
-const MAX_PANEL_RATIO = 0.6;
+const MAX_PANEL_RATIO = 0.9;
 
 function CodeEditor({
   files,
@@ -63,6 +66,8 @@ function CodeEditor({
   const [panelHeight, setPanelHeight] = useState(DEFAULT_PANEL_HEIGHT);
   const [panelCollapsed, setPanelCollapsed] = useState(false);
   const [showPanel, setShowPanel] = useState(false);
+  const editorRef = useRef<any>(null);
+  const containerRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     if (activeFile) {
@@ -110,10 +115,11 @@ function CodeEditor({
     }
   };
 
-  const handleEditorMount = (editor: any, monaco: any) => {
-    editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS, handleSave);
+  const handleEditorMount = useCallback((editor: any, monacoInstance: any) => {
+    editorRef.current = editor;
+    editor.addCommand(monacoInstance.KeyMod.CtrlCmd | monacoInstance.KeyCode.KeyS, handleSave);
 
-    monaco.editor.defineTheme("ambilab-dark", {
+    monacoInstance.editor.defineTheme("ambilab-dark", {
       base: "vs-dark",
       inherit: true,
       rules: [],
@@ -127,8 +133,14 @@ function CodeEditor({
       },
     });
 
-    monaco.editor.setTheme("ambilab-dark");
-  };
+    monacoInstance.editor.setTheme("ambilab-dark");
+
+    if (containerRef.current) {
+      const ro = new ResizeObserver(() => editor.layout());
+      ro.observe(containerRef.current);
+      editor.onDidDispose(() => ro.disconnect());
+    }
+  }, []);
 
   const handleResizeStart = (e: React.MouseEvent) => {
     e.preventDefault();
@@ -199,6 +211,7 @@ function CodeEditor({
 
       <div className="editor-split-container">
         <div
+          ref={containerRef}
           className="editor-content"
           style={{
             flex: showVisualization && !panelCollapsed ? undefined : 1,
@@ -221,10 +234,17 @@ function CodeEditor({
                 minimap: { enabled: true },
                 scrollBeyondLastLine: false,
                 renderLineHighlight: "all",
-                cursorBlinking: "smooth",
-                smoothScrolling: true,
+                cursorBlinking: "blink",
+                smoothScrolling: false,
+                mouseWheelScrollSensitivity: 1,
+                fastScrollSensitivity: 5,
                 padding: { top: 10 },
-                automaticLayout: true,
+                automaticLayout: false,
+                scrollbar: {
+                  useShadows: false,
+                  verticalScrollbarSize: 8,
+                  horizontalScrollbarSize: 8,
+                },
               }}
             />
           )}

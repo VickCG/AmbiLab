@@ -235,9 +235,13 @@ pub async fn read_json(
 
     // First open: return page immediately on a blocking thread, never block tokio.
     let path_for_query = path.clone();
+    let schema_cache = Arc::clone(&db.schema_cache);
     let page = tokio::task::spawn_blocking(move || {
         let conn = conn.lock();
-        query_json_auto(&conn, &path_for_query, limit, offset)
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            query_json_auto(&conn, &path_for_query, limit, offset, &schema_cache)
+        }))
+        .unwrap_or_else(|_| Err("JSON contains unsupported column types".to_string()))
     })
     .await
     .map_err(|e| e.to_string())??;
@@ -256,20 +260,74 @@ pub async fn read_json(
     Ok(page)
 }
 
+fn is_complex_duckdb_type(typ: &str) -> bool {
+    let t = typ.to_uppercase();
+    t.starts_with("STRUCT")
+        || t.starts_with("MAP")
+        || t.starts_with("LIST")
+        || t.starts_with("UNION")
+        || t.ends_with("[]")
+        || t == "JSON"
+}
+
+fn json_column_schema(
+    conn: &duckdb::Connection,
+    safe: &str,
+    path: &str,
+    cache: &DashMap<String, Vec<(String, bool)>>,
+) -> Result<Vec<(String, bool)>, String> {
+    if let Some(hit) = cache.get(path) {
+        return Ok(hit.clone());
+    }
+    let mut stmt = conn
+        .prepare(&format!(
+            "DESCRIBE SELECT * FROM read_json_auto('{safe}', maximum_object_size=268435456, sample_size=1000)"
+        ))
+        .map_err(|e| e.to_string())?;
+    let mut result = stmt.query([]).map_err(|e| e.to_string())?;
+    let mut cols = Vec::new();
+    while let Some(row) = result.next().map_err(|e| e.to_string())? {
+        let name: String = row.get(0).map_err(|e| e.to_string())?;
+        let typ: String = row.get(1).map_err(|e| e.to_string())?;
+        cols.push((name, is_complex_duckdb_type(&typ)));
+    }
+    cache.insert(path.to_string(), cols.clone());
+    Ok(cols)
+}
+
+fn build_json_select(schema: &[(String, bool)]) -> String {
+    schema
+        .iter()
+        .map(|(name, is_complex)| {
+            let quoted = name.replace('"', "\"\"");
+            if *is_complex {
+                format!("CAST(\"{quoted}\" AS VARCHAR) AS \"{quoted}\"")
+            } else {
+                format!("\"{quoted}\"")
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 fn query_json_auto(
     conn: &duckdb::Connection,
     path: &str,
     limit: usize,
     offset: usize,
+    schema_cache: &DashMap<String, Vec<(String, bool)>>,
 ) -> Result<DataPreview, String> {
     let safe = path.replace('\'', "''");
+    let schema = json_column_schema(conn, &safe, path, schema_cache)?;
+    let select = build_json_select(&schema);
+    let columns: Vec<String> = schema.into_iter().map(|(name, _)| name).collect();
+    let ncols = columns.len();
+
     let mut stmt = conn
         .prepare(&format!(
-            "SELECT * FROM read_json_auto('{safe}', maximum_object_size=268435456) LIMIT {limit} OFFSET {offset}"
+            "SELECT {select} FROM read_json_auto('{safe}', maximum_object_size=268435456, sample_size=1000) LIMIT {limit} OFFSET {offset}"
         ))
         .map_err(|e| e.to_string())?;
-    let columns = safe_column_names(&stmt);
-    let ncols = columns.len();
     let mut rows: Vec<Vec<String>> = Vec::with_capacity(limit);
     let mut result = stmt.query([]).map_err(|e| e.to_string())?;
     while let Some(row) = result.next().map_err(|e| e.to_string())? {
@@ -369,42 +427,45 @@ pub async fn read_jsonl(
 
     tokio::task::spawn_blocking(move || {
         let conn = conn.lock();
-        let safe = path.replace('\'', "''");
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let safe = path.replace('\'', "''");
 
-        let mut stmt = conn
-            .prepare(&format!(
-                "SELECT * FROM read_ndjson_auto('{safe}', maximum_object_size=268435456) LIMIT {limit} OFFSET {offset}"
-            ))
-            .map_err(|e| e.to_string())?;
+            let mut stmt = conn
+                .prepare(&format!(
+                    "SELECT * FROM read_ndjson_auto('{safe}', maximum_object_size=268435456) LIMIT {limit} OFFSET {offset}"
+                ))
+                .map_err(|e| e.to_string())?;
 
-        let columns = safe_column_names(&stmt);
-        let ncols = columns.len();
-        let mut rows: Vec<Vec<String>> = Vec::with_capacity(limit);
-        let mut result = stmt.query([]).map_err(|e| e.to_string())?;
+            let columns = safe_column_names(&stmt);
+            let ncols = columns.len();
+            let mut rows: Vec<Vec<String>> = Vec::with_capacity(limit);
+            let mut result = stmt.query([]).map_err(|e| e.to_string())?;
 
-        while let Some(row) = result.next().map_err(|e| e.to_string())? {
-            let mut data_row: Vec<String> = Vec::with_capacity(ncols);
-            for i in 0..ncols {
-                data_row.push(duckdb_value_to_string(row, i));
+            while let Some(row) = result.next().map_err(|e| e.to_string())? {
+                let mut data_row: Vec<String> = Vec::with_capacity(ncols);
+                for i in 0..ncols {
+                    data_row.push(duckdb_value_to_string(row, i));
+                }
+                rows.push(data_row);
             }
-            rows.push(data_row);
-        }
 
-        let total_rows = if let Some(count) = row_counts.get(&path) {
-            *count
-        } else {
-            let count: usize = conn
-                .query_row(
-                    &format!("SELECT COUNT(*) FROM read_ndjson_auto('{safe}', maximum_object_size=268435456)"),
-                    [],
-                    |r| r.get::<_, i64>(0),
-                )
-                .map_err(|e| e.to_string())? as usize;
-            row_counts.insert(path, count);
-            count
-        };
+            let total_rows = if let Some(count) = row_counts.get(&path) {
+                *count
+            } else {
+                let count: usize = conn
+                    .query_row(
+                        &format!("SELECT COUNT(*) FROM read_ndjson_auto('{safe}', maximum_object_size=268435456)"),
+                        [],
+                        |r| r.get::<_, i64>(0),
+                    )
+                    .map_err(|e| e.to_string())? as usize;
+                row_counts.insert(path, count);
+                count
+            };
 
-        Ok(DataPreview { columns, rows, total_rows })
+            Ok(DataPreview { columns, rows, total_rows })
+        }))
+        .unwrap_or_else(|_| Err("JSONL contains unsupported column types".to_string()))
     })
     .await
     .map_err(|e| e.to_string())?
@@ -427,9 +488,15 @@ fn safe_column_names(stmt: &duckdb::Statement<'_>) -> Vec<String> {
 
 fn duckdb_value_to_string(row: &duckdb::Row<'_>, idx: usize) -> String {
     use duckdb::types::ValueRef;
-    match row.get_ref(idx) {
-        Err(_) => "NULL".to_string(),
-        Ok(vref) => match vref {
+    use std::panic;
+
+    // duckdb-rs panics on complex types (STRUCT, LIST, MAP) inferred by read_json_auto.
+    let result = panic::catch_unwind(panic::AssertUnwindSafe(|| row.get_ref(idx)));
+
+    match result {
+        Err(_) => "...".to_string(),
+        Ok(Err(_)) => "NULL".to_string(),
+        Ok(Ok(vref)) => match vref {
             ValueRef::Null => "NULL".to_string(),
             ValueRef::Boolean(b) => b.to_string(),
             ValueRef::TinyInt(n) => n.to_string(),

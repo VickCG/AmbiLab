@@ -22,6 +22,9 @@ interface Props {
 }
 
 const PAGE_SIZE = 100;
+const ROW_HEIGHT = 32;
+const DEFAULT_COL_WIDTH = 150;
+const MIN_COL_WIDTH = 50;
 
 const COMMAND_MAP: Record<string, string> = {
   csv: "read_csv",
@@ -30,8 +33,6 @@ const COMMAND_MAP: Record<string, string> = {
   jsonl: "read_jsonl",
 };
 
-const ROW_HEIGHT = 32;
-
 function DataTableView({ filePath, fileType, onDataLoaded }: Props) {
   const [data, setData] = useState<DataPreview | null>(null);
   const [loading, setLoading] = useState(true);
@@ -39,17 +40,19 @@ function DataTableView({ filePath, fileType, onDataLoaded }: Props) {
   const [page, setPage] = useState(0);
   const [sortColumn, setSortColumn] = useState<number | null>(null);
   const [sortAsc, setSortAsc] = useState(true);
+  const [colWidths, setColWidths] = useState<Record<number, number>>({});
 
   const parentRef = useRef<HTMLDivElement>(null);
+  const resizingRef = useRef<{ colIdx: number; startX: number; startWidth: number } | null>(null);
 
   useEffect(() => {
+    setColWidths({});
     loadData();
   }, [filePath, page]);
 
   const loadData = async () => {
     setLoading(true);
     setError(null);
-
     try {
       const command = COMMAND_MAP[fileType] || "read_csv";
       const result = await invoke<DataPreview>(command, {
@@ -58,9 +61,7 @@ function DataTableView({ filePath, fileType, onDataLoaded }: Props) {
         offset: page * PAGE_SIZE,
       });
       setData(result);
-      if (onDataLoaded && page === 0) {
-        onDataLoaded(result);
-      }
+      if (onDataLoaded && page === 0) onDataLoaded(result);
     } catch (err) {
       setError(String(err));
     } finally {
@@ -77,20 +78,37 @@ function DataTableView({ filePath, fileType, onDataLoaded }: Props) {
     }
   };
 
+  const handleResizeStart = (e: React.MouseEvent, colIdx: number) => {
+    e.stopPropagation();
+    e.preventDefault();
+    const startWidth = colWidths[colIdx] ?? DEFAULT_COL_WIDTH;
+    resizingRef.current = { colIdx, startX: e.clientX, startWidth };
+
+    const onMove = (ev: MouseEvent) => {
+      if (!resizingRef.current) return;
+      const { colIdx: idx, startX, startWidth: sw } = resizingRef.current;
+      const newWidth = Math.max(MIN_COL_WIDTH, sw + ev.clientX - startX);
+      setColWidths((prev) => ({ ...prev, [idx]: newWidth }));
+    };
+
+    const onUp = () => {
+      resizingRef.current = null;
+      window.removeEventListener("mousemove", onMove);
+      window.removeEventListener("mouseup", onUp);
+    };
+
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", onUp);
+  };
+
   const sortedRows = (): string[][] => {
     if (!data || sortColumn === null) return data?.rows || [];
-
     return [...data.rows].sort((a, b) => {
       const aVal = a[sortColumn] || "";
       const bVal = b[sortColumn] || "";
-
       const aNum = parseFloat(aVal);
       const bNum = parseFloat(bVal);
-
-      if (!isNaN(aNum) && !isNaN(bNum)) {
-        return sortAsc ? aNum - bNum : bNum - aNum;
-      }
-
+      if (!isNaN(aNum) && !isNaN(bNum)) return sortAsc ? aNum - bNum : bNum - aNum;
       return sortAsc ? aVal.localeCompare(bVal) : bVal.localeCompare(aVal);
     });
   };
@@ -101,7 +119,7 @@ function DataTableView({ filePath, fileType, onDataLoaded }: Props) {
     count: rows.length,
     getScrollElement: () => parentRef.current,
     estimateSize: () => ROW_HEIGHT,
-    overscan: 5,
+    overscan: 20,
   });
 
   const virtualItems = rowVirtualizer.getVirtualItems();
@@ -113,17 +131,9 @@ function DataTableView({ filePath, fileType, onDataLoaded }: Props) {
 
   const totalPages = data ? Math.ceil(data.total_rows / PAGE_SIZE) : 0;
 
-  if (loading && !data) {
-    return <div className="data-table-loading">Loading data...</div>;
-  }
-
-  if (error) {
-    return <div className="data-table-error">Error: {error}</div>;
-  }
-
-  if (!data || data.columns.length === 0) {
-    return <div className="data-table-empty">No data available</div>;
-  }
+  if (loading && !data) return <div className="data-table-loading">Loading data...</div>;
+  if (error) return <div className="data-table-error">Error: {error}</div>;
+  if (!data || data.columns.length === 0) return <div className="data-table-empty">No data available</div>;
 
   return (
     <div className="data-table-container">
@@ -138,9 +148,14 @@ function DataTableView({ filePath, fileType, onDataLoaded }: Props) {
         <span className="data-table-cols">{data.columns.length} columns</span>
       </div>
 
-      {/* Virtualized scroll container — always ~5 DOM rows regardless of dataset */}
       <div ref={parentRef} className="data-table-wrapper">
         <table className="data-table">
+          <colgroup>
+            <col style={{ width: 48 }} />
+            {data.columns.map((_, idx) => (
+              <col key={idx} style={{ width: colWidths[idx] ?? DEFAULT_COL_WIDTH }} />
+            ))}
+          </colgroup>
           <thead>
             <tr>
               <th className="data-table-row-num">#</th>
@@ -149,11 +164,18 @@ function DataTableView({ filePath, fileType, onDataLoaded }: Props) {
                   key={idx}
                   onClick={() => handleSort(idx)}
                   className={sortColumn === idx ? "sorted" : ""}
+                  style={{ width: colWidths[idx] ?? DEFAULT_COL_WIDTH }}
                 >
-                  {col}
-                  {sortColumn === idx && (
-                    <span className="sort-indicator">{sortAsc ? " ↑" : " ↓"}</span>
-                  )}
+                  <span className="th-label">
+                    {col}
+                    {sortColumn === idx && (
+                      <span className="sort-indicator">{sortAsc ? " ↑" : " ↓"}</span>
+                    )}
+                  </span>
+                  <div
+                    className="col-resize-handle"
+                    onMouseDown={(e) => handleResizeStart(e, idx)}
+                  />
                 </th>
               ))}
             </tr>
@@ -161,26 +183,17 @@ function DataTableView({ filePath, fileType, onDataLoaded }: Props) {
           <tbody>
             {paddingTop > 0 && (
               <tr>
-                <td
-                  style={{ height: `${paddingTop}px`, padding: 0, border: "none" }}
-                  colSpan={data.columns.length + 1}
-                />
+                <td style={{ height: `${paddingTop}px`, padding: 0, border: "none" }} colSpan={data.columns.length + 1} />
               </tr>
             )}
             {virtualItems.map((virtualRow) => {
               const row = rows[virtualRow.index];
               return (
                 <tr key={virtualRow.index} style={{ height: `${ROW_HEIGHT}px` }}>
-                  <td className="data-table-row-num">
-                    {page * PAGE_SIZE + virtualRow.index + 1}
-                  </td>
+                  <td className="data-table-row-num">{page * PAGE_SIZE + virtualRow.index + 1}</td>
                   {row.map((cell, cellIdx) => (
                     <td key={cellIdx} title={cell}>
-                      {cell === "NULL" ? (
-                        <span className="null-value">NULL</span>
-                      ) : (
-                        cell
-                      )}
+                      {cell === "NULL" ? <span className="null-value">NULL</span> : cell}
                     </td>
                   ))}
                 </tr>
@@ -188,10 +201,7 @@ function DataTableView({ filePath, fileType, onDataLoaded }: Props) {
             })}
             {paddingBottom > 0 && (
               <tr>
-                <td
-                  style={{ height: `${paddingBottom}px`, padding: 0, border: "none" }}
-                  colSpan={data.columns.length + 1}
-                />
+                <td style={{ height: `${paddingBottom}px`, padding: 0, border: "none" }} colSpan={data.columns.length + 1} />
               </tr>
             )}
           </tbody>
@@ -207,9 +217,7 @@ function DataTableView({ filePath, fileType, onDataLoaded }: Props) {
           >
             <VscChevronLeft />
           </button>
-          <span className="pagination-info">
-            Page {page + 1} of {totalPages}
-          </span>
+          <span className="pagination-info">Page {page + 1} of {totalPages}</span>
           <button
             className="pagination-btn"
             onClick={() => setPage((p) => Math.min(totalPages - 1, p + 1))}

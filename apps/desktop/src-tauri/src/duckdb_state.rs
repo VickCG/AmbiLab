@@ -14,6 +14,9 @@ pub struct DuckDbState {
     /// Session-level row count cache: path → total_rows.
     /// Populated on first full-scan; valid for the lifetime of the process.
     pub row_counts: Arc<DashMap<String, usize>>,
+    /// Schema cache: path → [(col_name, is_complex)].
+    /// Avoids repeated DESCRIBE on every pagination request.
+    pub schema_cache: Arc<DashMap<String, Vec<(String, bool)>>>,
 }
 
 impl DuckDbState {
@@ -36,6 +39,7 @@ impl DuckDbState {
             conn: Arc::new(Mutex::new(conn)),
             building: Arc::new(DashMap::new()),
             row_counts: Arc::new(DashMap::new()),
+            schema_cache: Arc::new(DashMap::new()),
         })
     }
 }
